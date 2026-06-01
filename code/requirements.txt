@@ -1,0 +1,8 @@
+# 毕设原型 — Python 3.13.13
+# 安装：pip install -r requirements.txt
+
+# ---------- 核心依赖 ----------
+pandas>=2.0,<4.0
+numpy>=1.24,<3.0
+matplotlib>=3.7,<4.0
+coincurve>=21.0
