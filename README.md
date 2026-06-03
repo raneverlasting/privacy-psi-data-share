@@ -2,7 +2,7 @@
 
 本仓库是本科毕业论文《面向跨机构金融风控的隐私保护数据共享方案设计与实现》的配套原型代码。项目面向银行、支付平台、电商平台等机构之间的联合风控场景，目标是在不直接交换原始用户标识和明细风险数据的前提下，完成高风险用户集合的隐私对齐，并在交集对象上输出约定范围内的统计结果。
 
-系统基于两方半诚实模型实现。代码保留哈希基线和DH PSI作为对照方案，以ECDH PSI作为主要求交路线，并实现Socket ECDH PSI工程封装版本，用于评估消息帧封装、序列化、解码校验和通信量对协议性能的影响。交集统计部分实现明文统计演示和可加统计掩码合成流程，用于支撑论文中“隐私对齐+交集联合统计”的整体方案。
+系统基于两方半诚实模型实现。代码保留哈希基线和DH PSI作为对照方案，以ECDH PSI作为主要求交路线，并实现Socket ECDH PSI工程封装版本，用于评估消息帧封装、序列化、解码校验和通信量对协议性能的影响。交集统计部分实现明文统计演示和可加统计掩码合成流程，用于支撑论文中"隐私对齐+交集联合统计"的整体方案。
 
 ## 核心功能
 
@@ -39,6 +39,7 @@
 | `aggregation/secure_agg.py` | 明文统计演示与可加统计掩码合成 |
 | `eval/benchmark.py` | 多规模、多比例、多方法性能评测与图表生成 |
 | `eval/stats_schema.py` | benchmark统计字段规范化 |
+| `eval/reproduce_ecdh_socket.py` | 只复现ECDH PSI和Socket ECDH PSI两组核心实验的精简脚本 |
 | `requirements.txt` | Python依赖列表 |
 
 ## 环境准备
@@ -140,7 +141,7 @@ python eval/benchmark.py --sizes 1000,5000 --ratios 0.01,0.1 --repeats 1 --seed 
 | 文件 | 说明 |
 |---|---|
 | `benchmark_detail.csv` | 每次实验运行的明细结果 |
-| `benchmark_summary.csv` | 按数据规模、交集比例和方法聚合后的核心均值结果 |
+| `benchmark_summary.csv` | 与 `benchmark_table4_1.csv` 和 `../average.csv` 内容一致，均为论文展示格式的核心指标均值表 |
 | `benchmark_table4_1.csv` | 论文表4.1使用的核心指标表格 |
 | `../average.csv` | 根目录下的均值结果文件，字段与核心指标表一致 |
 | `run_meta.json` | 实验参数、运行环境和依赖版本 |
@@ -167,6 +168,8 @@ python eval/benchmark.py --sizes 1000,5000 --ratios 0.01,0.1 --repeats 1 --seed 
 分阶段耗时图中的`映射`指双方将`user_id`规范化后执行Hash-to-Scalar，并构造曲线点`Q(u)=h(u)P`的过程。`盲化`指双方使用随机私有标量对曲线点执行点乘，包括第一轮盲化、二次盲化和回传盲化，最终得到可比较但不暴露原始ID的双重盲化结果。
 
 ## CSV字段说明
+
+> `benchmark_detail.csv` 列名为英文原始字段（`total_ids`、`protocol_elapsed_ms` 等），下方核心字段表适用于 `benchmark_summary.csv` / `benchmark_table4_1.csv` / `average.csv`。
 
 核心字段如下：
 
@@ -244,7 +247,7 @@ data/bench_B.csv
 从新环境开始复现实验数据，并运行十次取均值生成根目录`average.csv`，可以按下面顺序执行：
 
 ```powershell
-cd C:\Users\Administrator\Desktop\code
+cd <项目根目录>
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 python test.py
