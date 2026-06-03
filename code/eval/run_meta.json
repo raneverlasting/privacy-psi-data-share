@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-06-01T23:55:06",
+  "timestamp": "2026-06-02T22:50:51",
   "python": "3.13.13",
   "python_full": "3.13.13 (tags/v3.13.13:01104ce, Apr  7 2026, 19:25:48) [MSC v.1944 64 bit (AMD64)]",
   "platform": "Windows-11-10.0.26200-SP0",
@@ -13,10 +13,9 @@
       5000
     ],
     "intersection_ratios": [
-      0.01,
-      0.1
+      0.01
     ],
-    "repeats": 1,
+    "repeats": 5,
     "include_socket": true,
     "seed": 2026,
     "methods": [
@@ -24,17 +23,6 @@
       "dh",
       "ecdh",
       "socket_ecdh"
-    ],
-    "comm_sizes": [
-      1000,
-      1500,
-      2000,
-      2500,
-      3000,
-      3500,
-      4000,
-      4500,
-      5000
     ],
     "method_display": {
       "hash_baseline": "哈希基线",
@@ -50,14 +38,7 @@
     "actual_intersection_size": "PSI方法实际输出的交集规模。",
     "is_correct": "actual_intersection_size是否等于expected_intersection_size。",
     "protocol_elapsed_ms": "方法内部统计的协议核心耗时，单位ms。",
-    "end_to_end_elapsed_ms": "从外部调用开始到结束的端到端耗时，单位ms。",
-    "comm_bytes": "A、B两端发送与接收字节数之和；hash_baseline、DH PSI和ECDH PSI为协议逻辑通信量估算，Socket ECDH PSI为实际Socket收发统计。",
-    "phase_map_ms": "ECDH PSI中标识映射或曲线点构造阶段耗时。",
-    "phase_blind_ms": "ECDH PSI中盲化阶段耗时。",
-    "phase_blind_a_ms": "Socket ECDH PSI中A侧第一轮盲化相关耗时。",
-    "phase_blind_b_ms": "Socket ECDH PSI中B侧第一轮/第二轮处理相关耗时。",
-    "phase_blind_back_ms": "Socket ECDH PSI中回传盲化相关耗时。",
-    "phase_compare_ms": "集合比较阶段耗时。"
+    "comm_bytes": "A、B两端发送与接收字节数之和；hash_baseline、DH PSI和ECDH PSI为协议逻辑通信量估算，Socket ECDH PSI为实际Socket收发统计。"
   },
   "dependencies": {
     "pandas": "3.0.2",

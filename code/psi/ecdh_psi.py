@@ -125,13 +125,20 @@ def ecdh_psi(path_a: str, path_b: str, return_stats: bool = False):
     map_ms = (time.time() - t_map) * 1000
 
     # 第二阶段：两方分别完成第一轮和第二轮盲化。
-    t_blind = time.time()
+    t_blind_a = time.time()
     blinded_a = _blind_serialized_points(points_a, a)
-    blinded_b = _blind_serialized_points(points_b, b)
+    phase_blind_a_ms = (time.time() - t_blind_a) * 1000
 
+    t_blind_b = time.time()
     double_blinded_a = _blind_serialized_points(blinded_a, b)
+    blinded_b = _blind_serialized_points(points_b, b)
+    phase_blind_b_ms = (time.time() - t_blind_b) * 1000
+
+    t_blind_back = time.time()
     double_blinded_b = _blind_serialized_points(blinded_b, a)
-    blind_ms = (time.time() - t_blind) * 1000
+    phase_blind_back_ms = (time.time() - t_blind_back) * 1000
+
+    blind_ms = phase_blind_a_ms + phase_blind_b_ms + phase_blind_back_ms
 
     # 第三阶段：比较双重盲化结果。
     t_compare = time.time()
@@ -150,9 +157,9 @@ def ecdh_psi(path_a: str, path_b: str, return_stats: bool = False):
         "comm_bytes": 0.0,
         "phase_map_ms": map_ms,
         "phase_blind_ms": blind_ms,
-        "phase_blind_a_ms": 0.0,
-        "phase_blind_b_ms": 0.0,
-        "phase_blind_back_ms": 0.0,
+        "phase_blind_a_ms": phase_blind_a_ms,
+        "phase_blind_b_ms": phase_blind_b_ms,
+        "phase_blind_back_ms": phase_blind_back_ms,
         "phase_compare_ms": compare_ms,
     }
 
@@ -163,7 +170,9 @@ def ecdh_psi(path_a: str, path_b: str, return_stats: bool = False):
     print(f"耗时：{elapsed * 1000:.2f}ms")
     print("说明：本方法基于椭圆曲线点乘实现双盲化，是本文主要求交路线")
     print(
-        f"分阶段耗时：映射={map_ms:.2f}ms，盲化={blind_ms:.2f}ms，比较={compare_ms:.2f}ms"
+        f"分阶段耗时：映射={map_ms:.2f}ms，A侧盲化={phase_blind_a_ms:.2f}ms，"
+        f"B侧处理={phase_blind_b_ms:.2f}ms，回传盲化={phase_blind_back_ms:.2f}ms，"
+        f"比较={compare_ms:.2f}ms"
     )
 
     if return_stats:

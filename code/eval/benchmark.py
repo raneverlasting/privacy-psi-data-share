@@ -49,6 +49,22 @@ from psi.ecdh_psi import ecdh_psi
 from psi.socket_ecdh_psi import socket_ecdh_psi
 from stats_schema import CANON_STAT_KEYS, normalize_psi_stats
 
+PHASE_STAT_KEYS = [key for key in CANON_STAT_KEYS if key != "comm_bytes"]
+PHASE_BREAKDOWN_COLS = [
+    ("phase_map_ms_mean", "映射"),
+    ("phase_blind_ms_mean", "盲化"),
+]
+PHASE_BREAKDOWN_COLORS = ["#4C78A8", "#F58518"]
+CORE_OUTPUT_COLUMNS = [
+    "方法",
+    "数据规模/条",
+    "交集比例",
+    "交集规模/条",
+    "协议耗时/ms",
+    "通信量/byte",
+    "校验结果",
+]
+
 
 # ============================================================
 # 方法名与论文展示名
@@ -124,6 +140,41 @@ def write_run_meta(out_dir: Path, meta: dict[str, Any]) -> None:
 
     with p.open("w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+def _write_csv_with_fallback(df: pd.DataFrame, path: Path) -> Path:
+    """
+    写入CSV；如果目标文件被Excel/WPS等程序占用，则写入同目录pending文件。
+
+    Windows下打开的CSV经常会锁定文件。正式benchmark耗时较长，
+    这里避免最后一步因为average.csv被占用而丢失均值结果。
+    """
+    try:
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+        return path
+    except PermissionError:
+        fallback = path.with_name(f"{path.stem}_pending{path.suffix}")
+        df.to_csv(fallback, index=False, encoding="utf-8-sig")
+        print(f"[WARN]{path.name}被占用，已改写入:{fallback}")
+        return fallback
+
+
+def _write_checkpoint(rows: list[dict[str, Any]], path: Path) -> None:
+    """
+    写入benchmark续跑检查点。
+
+    checkpoint只服务于中断续跑，不是正式实验输出。若文件被Excel/WPS等程序占用，
+    写入备用文件并继续运行，避免长时间实验因检查点写入失败而中断。
+    """
+    df = pd.DataFrame(rows)
+
+    try:
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+        return
+    except PermissionError:
+        fallback = path.with_name(f"{path.stem}_pending{path.suffix}")
+        df.to_csv(fallback, index=False, encoding="utf-8-sig")
+        print(f"[WARN]{path.name}被占用，checkpoint已临时写入:{fallback}")
 
 
 def _parse_int_list(csv_text: str) -> list[int]:
@@ -281,6 +332,16 @@ def _sort_by_method_order(df: pd.DataFrame) -> pd.DataFrame:
     out = out.sort_values(["total_ids", "intersection_ratio", "_method_order"])
     out = out.drop(columns="_method_order")
     return out
+
+
+def _run_key(row: dict[str, Any] | pd.Series) -> tuple[int, float, int, str]:
+    """构造单次实验的唯一键，用于benchmark中断后的自动续跑。"""
+    return (
+        int(row["total_ids"]),
+        float(row["intersection_ratio"]),
+        int(row["run_idx"]),
+        _normalize_method_name(str(row["method"])),
+    )
 
 
 def _estimate_protocol_comm_bytes(method: str, size_a: int, size_b: int) -> float:
@@ -476,8 +537,8 @@ def build_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
     字段命名规则：
     1.输入条件使用total_ids、intersection_ratio。
     2.方法使用method和method_display。
-    3.正确性使用expected_intersection_size、actual_intersection_size_mean、correct_rate。
-    4.均值字段统一采用xxx_mean，标准差字段统一采用xxx_std。
+    3.核心指标只保留交集规模、协议耗时、通信量和校验结果。
+    4.均值字段统一采用xxx_mean。
     """
     df = detail_df.copy()
 
@@ -504,8 +565,8 @@ def build_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
         "expected_intersection_size",
         "actual_intersection_size",
         "protocol_elapsed_ms",
-        "end_to_end_elapsed_ms",
-        *CANON_STAT_KEYS,
+        "comm_bytes",
+        *PHASE_STAT_KEYS,
     ]
 
     df = _ensure_numeric_columns(df, numeric_cols)
@@ -521,9 +582,6 @@ def build_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
             expected_intersection_size=("expected_intersection_size", "first"),
             actual_intersection_size_mean=("actual_intersection_size", "mean"),
             protocol_elapsed_ms_mean=("protocol_elapsed_ms", "mean"),
-            protocol_elapsed_ms_std=("protocol_elapsed_ms", "std"),
-            end_to_end_elapsed_ms_mean=("end_to_end_elapsed_ms", "mean"),
-            end_to_end_elapsed_ms_std=("end_to_end_elapsed_ms", "std"),
             comm_bytes_mean=("comm_bytes", "mean"),
             phase_map_ms_mean=("phase_map_ms", "mean"),
             phase_blind_ms_mean=("phase_blind_ms", "mean"),
@@ -541,9 +599,6 @@ def build_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
         "expected_intersection_size",
         "actual_intersection_size_mean",
         "protocol_elapsed_ms_mean",
-        "protocol_elapsed_ms_std",
-        "end_to_end_elapsed_ms_mean",
-        "end_to_end_elapsed_ms_std",
         "comm_bytes_mean",
         "phase_map_ms_mean",
         "phase_blind_ms_mean",
@@ -557,8 +612,14 @@ def build_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
     ]
 
     summary = _ensure_numeric_columns(summary, numeric_summary_cols)
-    summary["protocol_elapsed_ms_std"] = summary["protocol_elapsed_ms_std"].fillna(0.0)
-    summary["end_to_end_elapsed_ms_std"] = summary["end_to_end_elapsed_ms_std"].fillna(0.0)
+    blind_component_cols = [
+        "phase_blind_a_ms_mean",
+        "phase_blind_b_ms_mean",
+        "phase_blind_back_ms_mean",
+    ]
+    blind_component_sum = summary[blind_component_cols].sum(axis=1)
+    missing_blind_total = (summary["phase_blind_ms_mean"] <= 0) & (blind_component_sum > 0)
+    summary.loc[missing_blind_total, "phase_blind_ms_mean"] = blind_component_sum[missing_blind_total]
     summary["is_correct"] = summary["correct_runs"] == summary["total_runs"]
 
     summary = _sort_by_method_order(summary)
@@ -567,20 +628,17 @@ def build_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
 
 def build_paper_table(summary: pd.DataFrame) -> pd.DataFrame:
     """
-    生成论文表4.1推荐使用的精简表格。
+    生成论文表4.1推荐使用的核心指标表格。
 
-    注意：
-    - 该表只保留论文正文需要解释的字段。
-    - 分阶段耗时字段不进入表4.1，应放在4.3.4分阶段耗时分析中。
+    当前实验只保留协议耗时和通信量两个关键指标，
+    其他阶段耗时、端到端耗时等辅助指标不进入表格。
     """
     required_cols = [
         "method_display",
         "total_ids",
         "intersection_ratio",
-        "expected_intersection_size",
         "actual_intersection_size_mean",
         "protocol_elapsed_ms_mean",
-        "end_to_end_elapsed_ms_mean",
         "comm_bytes_mean",
         "is_correct",
     ]
@@ -596,22 +654,56 @@ def build_paper_table(summary: pd.DataFrame) -> pd.DataFrame:
             "method_display": "方法",
             "total_ids": "数据规模/条",
             "intersection_ratio": "交集比例",
-            "expected_intersection_size": "期望交集规模/条",
-            "actual_intersection_size_mean": "实际交集规模/条",
+            "actual_intersection_size_mean": "交集规模/条",
             "protocol_elapsed_ms_mean": "协议耗时/ms",
-            "end_to_end_elapsed_ms_mean": "端到端耗时/ms",
             "comm_bytes_mean": "通信量/byte",
             "is_correct": "校验结果",
         }
     )
 
-    table["实际交集规模/条"] = table["实际交集规模/条"].round(0).astype(int)
-    table["期望交集规模/条"] = table["期望交集规模/条"].round(0).astype(int)
+    table["交集规模/条"] = table["交集规模/条"].round(0).astype(int)
     table["通信量/byte"] = table["通信量/byte"].round(0).astype(int)
     table["校验结果"] = table["校验结果"].map({True: "通过", False: "未通过"}).fillna("未通过")
     table = _round_float_columns(table, digits=2)
 
-    return table
+    return table[CORE_OUTPUT_COLUMNS]
+
+
+def build_detail_table(detail: pd.DataFrame) -> pd.DataFrame:
+    """生成每次运行对应的核心指标明细表。"""
+    required_cols = [
+        "method_display",
+        "total_ids",
+        "intersection_ratio",
+        "actual_intersection_size",
+        "protocol_elapsed_ms",
+        "comm_bytes",
+        "is_correct",
+    ]
+
+    missing = [col for col in required_cols if col not in detail.columns]
+    if missing:
+        raise KeyError(f"detail缺少生成明细表所需字段:{missing}")
+
+    table = detail[required_cols].copy()
+    table = table.rename(
+        columns={
+            "method_display": "方法",
+            "total_ids": "数据规模/条",
+            "intersection_ratio": "交集比例",
+            "actual_intersection_size": "交集规模/条",
+            "protocol_elapsed_ms": "协议耗时/ms",
+            "comm_bytes": "通信量/byte",
+            "is_correct": "校验结果",
+        }
+    )
+
+    table["交集规模/条"] = table["交集规模/条"].round(0).astype(int)
+    table["通信量/byte"] = table["通信量/byte"].round(0).astype(int)
+    table["校验结果"] = table["校验结果"].map({True: "通过", False: "未通过"}).fillna("未通过")
+    table = _round_float_columns(table, digits=2)
+
+    return table[CORE_OUTPUT_COLUMNS]
 
 
 # ============================================================
@@ -653,6 +745,7 @@ def _save_grouped_bar_by_total_ids(
     plt.xlabel("数据规模（条）")
     plt.ylabel("协议耗时均值（ms）")
     plt.title(f"不同数据规模下各方法协议耗时对比（交集比例={base_ratio}）")
+    plt.yscale("log")
     plt.grid(True, axis="y", alpha=0.3)
     plt.legend()
     plt.tight_layout()
@@ -723,18 +816,19 @@ def _save_comm_bytes_plot(
         fig_df["comm_bytes_mean"] = fig_df["comm_bytes"]
 
     fig_df = fig_df.sort_values("total_ids")
+    fig_df["comm_kb_mean"] = fig_df["comm_bytes_mean"] / 1024.0
 
     plt.figure(figsize=(10, 5.5))
     plt.plot(
         fig_df["total_ids"],
-        fig_df["comm_bytes_mean"],
+        fig_df["comm_kb_mean"],
         marker="^",
         linewidth=1.8,
         label=_method_label(METHOD_SOCKET_ECDH),
     )
 
     plt.xlabel("数据规模（条）")
-    plt.ylabel("通信量均值（byte）")
+    plt.ylabel("通信量均值（KB）")
     plt.title(f"Socket ECDH PSI通信量随数据规模变化（交集比例={base_ratio}）")
     plt.grid(True, alpha=0.3)
     plt.legend()
@@ -769,29 +863,35 @@ def _save_phase_breakdown_plot(
     d = d.sort_values("total_ids")
 
     if method == METHOD_ECDH:
-        phase_cols = [
-            ("phase_map_ms_mean", "映射"),
-            ("phase_blind_ms_mean", "盲化"),
-            ("phase_compare_ms_mean", "比较"),
-        ]
         title = f"ECDH PSI分阶段耗时结构（交集比例={base_ratio}）"
 
     elif method == METHOD_SOCKET_ECDH:
-        phase_cols = [
-            ("phase_blind_a_ms_mean", "A侧盲化"),
-            ("phase_blind_b_ms_mean", "B侧处理"),
-            ("phase_blind_back_ms_mean", "回传盲化"),
-            ("phase_compare_ms_mean", "比较"),
-        ]
         title = f"Socket ECDH PSI分阶段耗时结构（交集比例={base_ratio}）"
 
     else:
         return False
 
-    for col, _ in phase_cols:
+    phase_numeric_cols = [
+        "phase_map_ms_mean",
+        "phase_blind_ms_mean",
+        "phase_blind_a_ms_mean",
+        "phase_blind_b_ms_mean",
+        "phase_blind_back_ms_mean",
+    ]
+    for col in phase_numeric_cols:
         if col not in d.columns:
             d[col] = 0.0
         d[col] = pd.to_numeric(d[col], errors="coerce").fillna(0.0)
+
+    blind_component_sum = d[
+        [
+            "phase_blind_a_ms_mean",
+            "phase_blind_b_ms_mean",
+            "phase_blind_back_ms_mean",
+        ]
+    ].sum(axis=1)
+    missing_blind_total = (d["phase_blind_ms_mean"] <= 0) & (blind_component_sum > 0)
+    d.loc[missing_blind_total, "phase_blind_ms_mean"] = blind_component_sum[missing_blind_total]
 
     x = np.arange(len(d))
     labels = d["total_ids"].astype(str).tolist()
@@ -800,7 +900,7 @@ def _save_phase_breakdown_plot(
 
     plt.figure(figsize=(10, 5.5))
 
-    for col, label in phase_cols:
+    for (col, label), color in zip(PHASE_BREAKDOWN_COLS, PHASE_BREAKDOWN_COLORS):
         values = d[col].to_numpy(dtype=float)
         plt.bar(
             x,
@@ -808,7 +908,11 @@ def _save_phase_breakdown_plot(
             bottom=bottoms,
             width=0.55,
             label=label,
+            color=color,
+            edgecolor="white",
+            linewidth=1.0,
         )
+
         bottoms += values
 
     for xi, total in zip(x, bottoms):
@@ -908,7 +1012,7 @@ def run_benchmark(
     1.数据规模total_ids
     2.交集比例intersection_ratio
     3.重复实验repeats
-    4.输出detail/summary/paper_table/meta/图表
+    4.输出detail/summary/average/meta
     """
     if sizes is None:
         sizes = [1000, 5000]
@@ -918,11 +1022,6 @@ def run_benchmark(
     if repeats <= 0:
         raise ValueError("repeats必须大于0")
 
-    if comm_sizes is None:
-        comm_sizes = _default_comm_sizes(sizes)
-    else:
-        comm_sizes = sorted({int(size) for size in comm_sizes if int(size) > 0})
-
     out_path = Path(out_dir).resolve() if out_dir else EVAL_DIR
     out_path.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -931,6 +1030,8 @@ def run_benchmark(
     tmp_b = DATA_DIR / "bench_B.csv"
 
     methods = METHODS_WITH_SOCKET.copy() if include_socket else METHODS_BASE.copy()
+    checkpoint_csv = out_path / "benchmark_checkpoint.csv"
+    checkpoint_pending_csv = out_path / "benchmark_checkpoint_pending.csv"
 
     meta = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -948,7 +1049,6 @@ def run_benchmark(
             "include_socket": include_socket,
             "seed": seed,
             "methods": methods,
-            "comm_sizes": comm_sizes if include_socket else [],
             "method_display": METHOD_DISPLAY,
         },
         "field_notes": {
@@ -958,14 +1058,7 @@ def run_benchmark(
             "actual_intersection_size": "PSI方法实际输出的交集规模。",
             "is_correct": "actual_intersection_size是否等于expected_intersection_size。",
             "protocol_elapsed_ms": "方法内部统计的协议核心耗时，单位ms。",
-            "end_to_end_elapsed_ms": "从外部调用开始到结束的端到端耗时，单位ms。",
             "comm_bytes": "A、B两端发送与接收字节数之和；hash_baseline、DH PSI和ECDH PSI为协议逻辑通信量估算，Socket ECDH PSI为实际Socket收发统计。",
-            "phase_map_ms": "ECDH PSI中标识映射或曲线点构造阶段耗时。",
-            "phase_blind_ms": "ECDH PSI中盲化阶段耗时。",
-            "phase_blind_a_ms": "Socket ECDH PSI中A侧第一轮盲化相关耗时。",
-            "phase_blind_b_ms": "Socket ECDH PSI中B侧第一轮/第二轮处理相关耗时。",
-            "phase_blind_back_ms": "Socket ECDH PSI中回传盲化相关耗时。",
-            "phase_compare_ms": "集合比较阶段耗时。",
         },
         "dependencies": _dep_versions(),
     }
@@ -973,6 +1066,32 @@ def run_benchmark(
     write_run_meta(out_path, meta)
 
     rows: list[dict[str, Any]] = []
+    completed: set[tuple[int, float, int, str]] = set()
+
+    checkpoint_candidates = [p for p in (checkpoint_csv, checkpoint_pending_csv) if p.exists()]
+    checkpoint_source = (
+        max(checkpoint_candidates, key=lambda p: p.stat().st_mtime)
+        if checkpoint_candidates
+        else checkpoint_csv
+    )
+    if checkpoint_source.exists():
+        checkpoint_df = pd.read_csv(checkpoint_source)
+        if not checkpoint_df.empty:
+            for _, existing_row in checkpoint_df.iterrows():
+                key = _run_key(existing_row)
+                if (
+                    key[0] in sizes
+                    and key[1] in intersection_ratios
+                    and 0 <= key[2] < repeats
+                    and key[3] in methods
+                ):
+                    row_dict = existing_row.to_dict()
+                    row_dict["method"] = _normalize_method_name(str(row_dict["method"]))
+                    rows.append(row_dict)
+                    completed.add(key)
+
+        if completed:
+            print(f"检测到checkpoint:{checkpoint_source}，已恢复完成记录:{len(completed)}条")
 
     print("=== 性能评测开始 ===")
     print(f"输出目录:{out_path}")
@@ -1001,7 +1120,13 @@ def run_benchmark(
 
                 for method in methods:
                     method = _normalize_method_name(method)
-                    begin = time.perf_counter()
+                    current_key = (total_ids, float(ratio), run_idx, method)
+                    if current_key in completed:
+                        print(
+                            f"[SKIP] total_ids={total_ids:<7} ratio={ratio:<6} "
+                            f"run={run_idx:<3} method={method:<13} 已完成"
+                        )
+                        continue
 
                     result = _run_one_method(method, str(tmp_a), str(tmp_b))
                     intersection_ids, elapsed_seconds, raw_stats = _extract_method_result(result)
@@ -1013,7 +1138,6 @@ def run_benchmark(
                             size_a=total_ids,
                             size_b=total_ids,
                         )
-                    end_to_end_elapsed_ms = (time.perf_counter() - begin) * 1000.0
 
                     actual_intersection_size = _safe_len(intersection_ids)
                     is_correct = actual_intersection_size == expected_intersection_size
@@ -1029,11 +1153,13 @@ def run_benchmark(
                         "actual_intersection_size": actual_intersection_size,
                         "is_correct": is_correct,
                         "protocol_elapsed_ms": elapsed_seconds * 1000.0,
-                        "end_to_end_elapsed_ms": end_to_end_elapsed_ms,
+                        "comm_bytes": norm["comm_bytes"],
                     }
 
                     row.update(norm)
                     rows.append(row)
+                    completed.add(current_key)
+                    _write_checkpoint(rows, checkpoint_csv)
 
                     flag = "OK" if is_correct else "WARN"
                     print(
@@ -1042,17 +1168,13 @@ def run_benchmark(
                         f"method={method:<13} "
                         f"intersection={actual_intersection_size:<6}/{expected_intersection_size:<6} "
                         f"protocol_ms={elapsed_seconds * 1000.0:>10.2f} "
-                        f"e2e_ms={end_to_end_elapsed_ms:>10.2f}"
+                        f"comm_bytes={norm['comm_bytes']:>12.0f}"
                     )
 
-    detail = pd.DataFrame(rows)
+    detail_internal = pd.DataFrame(rows)
 
-    # 统一补齐数值列，避免某些方法没有stats字段导致后续groupby或画图失败。
-    detail_numeric_cols = [*CANON_STAT_KEYS]
-    detail = _ensure_numeric_columns(detail, detail_numeric_cols)
-
-    # 规范列顺序，避免CSV字段混乱。
-    detail_cols = [
+    # 规范内部列顺序，避免后续汇总字段混乱。
+    detail_internal_cols = [
         "total_ids",
         "intersection_ratio",
         "run_idx",
@@ -1063,42 +1185,28 @@ def run_benchmark(
         "actual_intersection_size",
         "is_correct",
         "protocol_elapsed_ms",
-        "end_to_end_elapsed_ms",
-        *CANON_STAT_KEYS,
+        "comm_bytes",
+        *PHASE_STAT_KEYS,
     ]
-    detail = detail[[col for col in detail_cols if col in detail.columns]]
+    detail_internal = detail_internal[
+        [col for col in detail_internal_cols if col in detail_internal.columns]
+    ]
 
+    detail_table = build_detail_table(detail_internal)
     detail_csv = out_path / "benchmark_detail.csv"
-    detail.to_csv(detail_csv, index=False, encoding="utf-8-sig")
+    detail_table.to_csv(detail_csv, index=False, encoding="utf-8-sig")
 
-    summary = build_summary(detail)
-    summary_csv = out_path / "benchmark_summary.csv"
-    summary.to_csv(summary_csv, index=False, encoding="utf-8-sig")
-
-    average_csv = ROOT_DIR / "average.csv"
-    summary.to_csv(average_csv, index=False, encoding="utf-8-sig")
-
+    summary = build_summary(detail_internal)
     paper_table = build_paper_table(summary)
+
+    summary_csv = out_path / "benchmark_summary.csv"
+    paper_table.to_csv(summary_csv, index=False, encoding="utf-8-sig")
+
     paper_table_csv = out_path / "benchmark_table4_1.csv"
     paper_table.to_csv(paper_table_csv, index=False, encoding="utf-8-sig")
 
-    comm_detail = pd.DataFrame()
-    if include_socket and comm_sizes:
-        comm_detail = _run_socket_comm_detail(
-            comm_sizes=comm_sizes,
-            base_ratio=intersection_ratios[0],
-            repeats=repeats,
-            seed=seed,
-            tmp_a=tmp_a,
-            tmp_b=tmp_b,
-        )
-        if not comm_detail.empty:
-            comm_detail_csv = out_path / "benchmark_comm_detail.csv"
-            comm_detail.to_csv(comm_detail_csv, index=False, encoding="utf-8-sig")
-        else:
-            comm_detail_csv = None
-    else:
-        comm_detail_csv = None
+    average_csv = ROOT_DIR / "average.csv"
+    average_csv = _write_csv_with_fallback(paper_table, average_csv)
 
     plot_paths = generate_plots(
         summary=summary,
@@ -1106,8 +1214,12 @@ def run_benchmark(
         intersection_ratios=intersection_ratios,
         methods=methods,
         out_dir=out_path,
-        comm_detail=comm_detail,
+        comm_detail=None,
     )
+
+    for p in (checkpoint_csv, checkpoint_pending_csv):
+        if p.exists():
+            p.unlink()
 
     print("\n=== 评测完成 ===")
     print(f"运行元数据:{out_path / 'run_meta.json'}")
@@ -1115,13 +1227,10 @@ def run_benchmark(
     print(f"汇总结果:{summary_csv}")
     print(f"均值结果:{average_csv}")
     print(f"论文表4.1:{paper_table_csv}")
-    if comm_detail_csv is not None:
-        print(f"Socket通信量采样:{comm_detail_csv}")
-
     for name, path in plot_paths.items():
         print(f"图表{name}:{path}")
 
-    wrong = detail[detail["is_correct"] == False]
+    wrong = detail_internal[detail_internal["is_correct"] == False]
     if not wrong.empty:
         print("\n[WARN]存在交集规模不一致的实验记录，请检查benchmark_detail.csv:")
         print(
@@ -1137,7 +1246,7 @@ def run_benchmark(
             ].to_string(index=False)
         )
 
-    return detail, summary, paper_table
+    return detail_internal, summary, paper_table
 
 
 # ============================================================
